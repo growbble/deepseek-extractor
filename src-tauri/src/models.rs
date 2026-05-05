@@ -11,6 +11,18 @@ pub struct FileEntry {
     pub selected: bool,
 }
 
+impl FileEntry {
+    /// Validate entry — reject path traversal attempts
+    pub fn is_safe_path(&self) -> bool {
+        !self.path.contains("..") && !self.path.starts_with('/') && !self.path.starts_with('\\')
+    }
+
+    /// Sanitize path for display (strip null bytes, control chars)
+    pub fn sanitize_path(&self) -> String {
+        self.path.chars().filter(|&c| c != '\0' && !c.is_control() || c == '/' || c == '.' || c == '_' || c == '-').collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractResult {
     pub files: Vec<FileEntry>,

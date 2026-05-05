@@ -8,7 +8,7 @@ mod url_extractor;
 
 use commands::AppState;
 use extractor::learning;
-use models::LearningModel;
+use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()

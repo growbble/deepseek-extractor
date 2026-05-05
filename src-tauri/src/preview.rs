@@ -3,6 +3,9 @@ use syntect::html::styled_line_to_highlighted_html;
 use syntect::parsing::SyntaxSet;
 use syntect::easy::HighlightLines;
 
+/// Highlight code using syntect, returning safe HTML.
+/// The output is wrapped in <pre><code> with inline styles (no XSS vectors
+/// since syntect only emits styled spans, and we escape all user text).
 pub fn highlight_code(code: &str, language: &str) -> Result<String, String> {
     let ss = SyntaxSet::load_defaults_newlines();
     let ts = ThemeSet::load_defaults();
@@ -32,16 +35,16 @@ pub fn highlight_code(code: &str, language: &str) -> Result<String, String> {
         match highlighter.highlight_line(line, &ss) {
             Ok(regions) => {
                 let html = styled_line_to_highlighted_html(&regions, syntect::html::IncludeBackground::No);
-                html_output.push_str(&html);
+                if let Ok(html_str) = &html {
+                    html_output.push_str(html_str);
+                } else {
+                    // Fallback: escape as plain text
+                    html_output.push_str(&html_escape(line));
+                    html_output.push('\n');
+                }
             }
             Err(_) => {
-                // Fallback: escape the line as plain HTML
-                let escaped = line
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;")
-                    .replace('"', "&quot;");
-                html_output.push_str(&escaped);
+                html_output.push_str(&html_escape(line));
                 html_output.push('\n');
             }
         }
@@ -50,4 +53,20 @@ pub fn highlight_code(code: &str, language: &str) -> Result<String, String> {
     html_output.push_str("</code></pre>");
 
     Ok(html_output)
+}
+
+/// Simple HTML entity escaping to prevent XSS via code content
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }

@@ -6,3 +6,19 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.key
+*.crt
+*.cer
+# Tauri signing keys
+src-tauri/sign.key
+src-tauri/sign.pub
+*.dmp
+*.log
+# IDE
+*.swp
+*.swo

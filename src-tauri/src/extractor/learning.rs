@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::models::{FileEntry, LearnedPattern, LearningModel, TrainingExample};
 
@@ -76,8 +76,11 @@ pub fn classify(features: &[f64], weights: &[f64]) -> bool {
 }
 
 pub fn train(examples: &[TrainingExample]) -> Vec<f64> {
-    // Simple perceptron-like training
-    let mut weights = vec![0.125; 8]; // uniform starting weights
+    if examples.is_empty() {
+        return vec![0.125; 8];
+    }
+
+    let mut weights = vec![0.125; 8];
     let learning_rate = 0.01;
     let epochs = 100;
 
@@ -103,9 +106,15 @@ pub fn load_model(app: &AppHandle) -> LearningModel {
     if model_path.exists() {
         match std::fs::read_to_string(&model_path) {
             Ok(content) => {
-                serde_json::from_str(&content).unwrap_or_else(|_| default_model())
+                serde_json::from_str(&content).unwrap_or_else(|e| {
+                    eprintln!("Failed to parse learning model, using defaults: {}", e);
+                    default_model()
+                })
             }
-            Err(_) => default_model(),
+            Err(e) => {
+                eprintln!("Failed to read learning model, using defaults: {}", e);
+                default_model()
+            }
         }
     } else {
         default_model()
@@ -115,7 +124,8 @@ pub fn load_model(app: &AppHandle) -> LearningModel {
 pub fn save_model(app: &AppHandle, model: &LearningModel) -> Result<(), String> {
     let model_path = get_model_path(app);
     if let Some(parent) = model_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create model dir: {}", e))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create model dir: {}", e))?;
     }
     let content = serde_json::to_string_pretty(model)
         .map_err(|e| format!("Failed to serialize model: {}", e))?;
@@ -124,7 +134,7 @@ pub fn save_model(app: &AppHandle, model: &LearningModel) -> Result<(), String> 
     Ok(())
 }
 
-pub fn get_model_path(app: &AppHandle) -> PathBuf {
+fn get_model_path(app: &AppHandle) -> PathBuf {
     let path = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
     path.join("models").join("learning_model.json")
 }
@@ -178,9 +188,15 @@ pub fn add_training_example(
         user_corrected,
         features,
     };
-    model.training_examples.push(example);
 
-    // Retrain with new data
+    // Limit training examples to prevent unbounded memory growth
+    const MAX_EXAMPLES: usize = 1000;
+    model.training_examples.push(example);
+    if model.training_examples.len() > MAX_EXAMPLES {
+        model.training_examples.remove(0);
+    }
+
+    // Retrain with new data when we have enough
     if model.training_examples.len() >= 5 {
         model.feature_weights = train(&model.training_examples);
     }

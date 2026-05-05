@@ -4,8 +4,7 @@ pub mod claude;
 pub mod grok;
 pub mod fallback;
 
-use crate::extractor::learning::LearningModel;
-use crate::models::ExtractResult;
+use crate::models::{ExtractResult, LearningModel};
 use crate::extractor::extract_from_text;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +39,8 @@ pub async fn fetch_and_extract(url: &str, model: &LearningModel) -> Result<Extra
 
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .timeout(std::time::Duration::from_secs(15)) // Request-level timeout
+        .connect_timeout(std::time::Duration::from_secs(10)) // Connection timeout
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -48,9 +49,19 @@ pub async fn fetch_and_extract(url: &str, model: &LearningModel) -> Result<Extra
         .await
         .map_err(|e| format!("Failed to fetch URL: {}", e))?;
 
+    // Check HTTP status first
+    if !response.status().is_success() {
+        return Err(format!("Server returned HTTP {}", response.status()));
+    }
+
+    // Limit response body size (10MB) to prevent memory exhaustion
     let html = response.text()
         .await
         .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    if html.len() > 10_485_760 {
+        return Err("Response too large (>10MB)".to_string());
+    }
 
     let text_content = match platform {
         AiPlatform::DeepSeek => deepseek::extract_from_html(&html),

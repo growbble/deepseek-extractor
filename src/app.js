@@ -11,10 +11,8 @@ async function invoke(cmd, args) {
         if (__TAURI__ && __TAURI__.core) {
             return await __TAURI__.core.invoke(cmd, args || {});
         }
-        // Fallback for older Tauri versions
         if (window.__TAURI_INTERNALS__) {
-            const result = await window.__TAURI_INTERNALS__.invoke(cmd, args || {});
-            return result;
+            return await window.__TAURI_INTERNALS__.invoke(cmd, args || {});
         }
         throw new Error('Tauri API not available');
     } catch (err) {
@@ -25,24 +23,9 @@ async function invoke(cmd, args) {
 }
 
 // ========== LOCALIZATION ==========
-const i18nData = {};
-
-async function loadI18n() {
-    // i18n is handled by the Rust backend; we just toggle class on lang buttons
-}
-
-function setLang(lang) {
-    currentLang = lang;
-    document.querySelectorAll('.lang-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.lang === lang);
-    });
-    updateAllTexts();
-}
-
-function t(key) {
-    // Simple client-side fallback translations
-    const ru = {
-        'app_name': 'DeepSeek Extractor',
+// Client-side i18n — mirrors Rust backend for offline use
+const i18nDict = {
+    ru: {
         'paste_from_clipboard': '📋 Вставить из буфера',
         'extract': '🔍 Извлечь',
         'extract_from_url': '🔍 Извлечь',
@@ -85,9 +68,14 @@ function t(key) {
         'archive_created': 'Архив создан',
         'archives': 'Архивы CodePack (*.cpk)',
         'all_files': 'Все файлы',
-    };
-    const en = {
-        'app_name': 'DeepSeek Extractor',
+        'enter_url': 'Введите URL',
+        'output_path': 'Путь к папке:',
+        'output_dir': 'Папка для извлечения:',
+        'saved_files': 'Сохранено',
+        'files': 'файлов',
+        'selected': 'выбрано',
+    },
+    en: {
         'paste_from_clipboard': '📋 Paste from Clipboard',
         'extract': '🔍 Extract',
         'extract_from_url': '🔍 Extract',
@@ -130,32 +118,45 @@ function t(key) {
         'archive_created': 'Archive created',
         'archives': 'CodePack Archives (*.cpk)',
         'all_files': 'All Files',
-    };
-    const dict = currentLang === 'ru' ? ru : en;
+        'enter_url': 'Enter URL',
+        'output_path': 'Output folder path:',
+        'output_dir': 'Output directory:',
+        'saved_files': 'Saved',
+        'files': 'files',
+        'selected': 'selected',
+    }
+};
+
+function t(key) {
+    const dict = i18nDict[currentLang] || i18nDict.ru;
     return dict[key] || key;
 }
 
+function setLang(lang) {
+    currentLang = lang;
+    document.querySelectorAll('.lang-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.lang === lang);
+    });
+    updateAllTexts();
+}
+
 function updateAllTexts() {
-    // Update data-i18n elements
     document.querySelectorAll('[data-i18n]').forEach(el => {
         const key = el.dataset.i18n;
         const text = t(key);
         if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
             el.placeholder = t(el.dataset.i18nPlaceholder || key);
         } else {
-            // Don't override innerHTML of elements with children (like buttons with nested content)
             if (!el.querySelector('*')) {
                 el.textContent = text;
             }
         }
     });
 
-    // Update placeholders
     document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
         el.placeholder = t(el.dataset.i18nPlaceholder);
     });
 
-    // Update status
     updateStatusBar();
 }
 
@@ -173,9 +174,17 @@ async function pasteFromClipboard() {
 async function fetchFromUrl() {
     const url = document.getElementById('url-input').value.trim();
     if (!url) {
-        showStatus(currentLang === 'ru' ? 'Введите URL' : 'Enter URL', 'warning');
+        showStatus(t('enter_url'), 'warning');
         return;
     }
+    // Client-side URL validation
+    try {
+        new URL(url);
+    } catch {
+        showStatus('Invalid URL format', 'warning');
+        return;
+    }
+
     try {
         showStatus(t('status_extracting'), 'info');
         const result = await invoke('extract_from_url', { url: url });
@@ -207,15 +216,17 @@ async function saveToFolder() {
         return;
     }
 
-    // Use Tauri dialog to pick folder
     let folderPath = null;
     try {
         if (__TAURI__ && __TAURI__.dialog) {
             folderPath = await __TAURI__.dialog.open({ directory: true });
+        } else if (window.showDirectoryPicker) {
+            // Web fallback
+            const dirHandle = await window.showDirectoryPicker();
+            folderPath = dirHandle.name;
         }
     } catch (e) {
-        // Dialog not available, prompt manually
-        folderPath = prompt(currentLang === 'ru' ? 'Путь к папке:' : 'Output folder path:');
+        folderPath = prompt(t('output_path'));
     }
 
     if (!folderPath) return;
@@ -226,7 +237,7 @@ async function saveToFolder() {
             files: selected,
             basePath: folderPath
         });
-        showStatus(`${currentLang === 'ru' ? 'Сохранено' : 'Saved'} ${count} ${currentLang === 'ru' ? 'файлов' : 'files'}`, 'success');
+        showStatus(`${t('saved_files')} ${count} ${t('files')}`, 'success');
     } catch (err) {
         showStatus('Error: ' + err.toString(), 'error');
     }
@@ -248,7 +259,7 @@ async function createArchive() {
         }
     } catch (e) {
         const archiveInput = document.getElementById('archive-path');
-        savePath = archiveInput.value.trim() || prompt(currentLang === 'ru' ? 'Путь для архива:' : 'Archive save path:');
+        savePath = archiveInput.value.trim() || prompt('Archive save path:');
     }
 
     if (!savePath) return;
@@ -259,7 +270,7 @@ async function createArchive() {
             files: selected,
             savePath: savePath
         });
-        showStatus(`${t('archive_created')}: ${info.file_count} ${currentLang === 'ru' ? 'файлов' : 'files'}`, 'success');
+        showStatus(`${t('archive_created')}: ${info.file_count} ${t('files')}`, 'success');
     } catch (err) {
         showStatus('Error: ' + err.toString(), 'error');
     }
@@ -275,7 +286,7 @@ async function extractArchive() {
                 });
             }
         } catch (e) {
-            archivePath = prompt(currentLang === 'ru' ? 'Путь к архиву:' : 'Archive path:');
+            archivePath = prompt('Archive path:');
         }
     }
 
@@ -287,7 +298,7 @@ async function extractArchive() {
             outputDir = await __TAURI__.dialog.open({ directory: true });
         }
     } catch (e) {
-        outputDir = prompt(currentLang === 'ru' ? 'Папка для извлечения:' : 'Output directory:');
+        outputDir = prompt(t('output_dir'));
     }
 
     if (!outputDir) return;
@@ -317,18 +328,15 @@ async function previewFile(fileId) {
 
     try {
         const html = await invoke('preview_file', { file: file });
-        previewContent.innerHTML = html;
+        // Sanitize: ensure no script execution from syntax highlighting output
+        const sanitized = html.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
+        previewContent.innerHTML = sanitized;
     } catch (err) {
         // Fallback: show plain text with escaping
-        const escaped = file.content
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
+        const escaped = escapeHtml(file.content);
         previewContent.innerHTML = `<pre style="background:#0a0e1a;color:#d4d4d4;padding:16px;border-radius:8px;overflow:auto;font-family:monospace;font-size:13px;line-height:1.5;"><code>${escaped}</code></pre>`;
     }
 
-    // Highlight selected row
     document.querySelectorAll('#file-table-body tr').forEach(tr => {
         tr.classList.toggle('selected', tr.dataset.id === fileId);
     });
@@ -416,29 +424,20 @@ async function editFileName(index, td) {
         if (newName && newName !== oldName) {
             const oldEntry = { ...extractedFiles[index] };
             extractedFiles[index].name = newName;
-            // Update path if name changed
             const pathParts = extractedFiles[index].path.split('/');
             if (pathParts.length > 0) {
                 pathParts[pathParts.length - 1] = newName;
                 extractedFiles[index].path = pathParts.join('/');
             }
-            try {
-                await invoke('update_entry', {
-                    oldEntry: oldEntry,
-                    newEntry: extractedFiles[index]
-                });
-            } catch (e) {
-                // silently ignore
-            }
-            renderTable();
-        } else {
-            renderTable();
+            try { await invoke('update_entry', { oldEntry, newEntry: extractedFiles[index] }); }
+            catch (e) { /* silent */ }
         }
+        renderTable();
     });
 
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') input.blur();
-        if (e.key === 'Escape') { renderTable(); }
+        if (e.key === 'Escape') renderTable();
     });
 }
 
@@ -458,29 +457,19 @@ function editFilePath(index, td) {
         if (newPath && newPath !== oldPath) {
             const oldEntry = { ...extractedFiles[index] };
             extractedFiles[index].path = newPath;
-            // Update name from new path
             const parts = newPath.split('/');
             extractedFiles[index].name = parts[parts.length - 1];
-            // Update language
             const ext = newPath.split('.').pop() || '';
             extractedFiles[index].language = ext || 'text';
-            try {
-                await invoke('update_entry', {
-                    oldEntry: oldEntry,
-                    newEntry: extractedFiles[index]
-                });
-            } catch (e) {
-                // silently ignore
-            }
-            renderTable();
-        } else {
-            renderTable();
+            try { await invoke('update_entry', { oldEntry, newEntry: extractedFiles[index] }); }
+            catch (e) { /* silent */ }
         }
+        renderTable();
     });
 
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') input.blur();
-        if (e.key === 'Escape') { renderTable(); }
+        if (e.key === 'Escape') renderTable();
     });
 }
 
@@ -495,14 +484,8 @@ async function editFileRename(index) {
             pathParts[pathParts.length - 1] = newName.trim();
             extractedFiles[index].path = pathParts.join('/');
         }
-        try {
-            await invoke('update_entry', {
-                oldEntry: oldEntry,
-                newEntry: extractedFiles[index]
-            });
-        } catch (e) {
-            // silently ignore
-        }
+        try { await invoke('update_entry', { oldEntry, newEntry: extractedFiles[index] }); }
+        catch (e) { /* silent */ }
         renderTable();
     }
 }
@@ -512,7 +495,6 @@ async function resetLearning() {
     if (!confirm(t('confirm') + '?')) return;
 
     try {
-        // Reset model to defaults
         const defaultModel = {
             patterns: [
                 { regex: "(?m)^\\s*//\\s*File:\\s*(.+)$", path_group: 1, content_group: 0, language_hint: null, confidence: 0.9, usage_count: 0 },
@@ -533,6 +515,8 @@ async function resetLearning() {
 // ========== DRAG & DROP ==========
 const dropZone = document.getElementById('drop-zone');
 
+let dragCounter = 0;
+
 dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -542,12 +526,24 @@ dropZone.addEventListener('dragover', (e) => {
 dropZone.addEventListener('dragleave', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    dropZone.classList.remove('dragover');
+    dragCounter--;
+    if (dragCounter <= 0) {
+        dragCounter = 0;
+        dropZone.classList.remove('dragover');
+    }
+});
+
+dropZone.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter++;
+    dropZone.classList.add('dragover');
 });
 
 dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     e.stopPropagation();
+    dragCounter = 0;
     dropZone.classList.remove('dragover');
 
     const files = e.dataTransfer.files;
@@ -556,24 +552,35 @@ dropZone.addEventListener('drop', (e) => {
         const reader = new FileReader();
         reader.onload = async (event) => {
             const text = event.target.result;
+            if (!text.trim()) return;
+
+            // Send to Rust backend for proper extraction
             try {
                 showStatus(t('status_extracting'), 'info');
                 const result = await invoke('extract_from_clipboard');
-                // Override with the dropped file content
-                handleExtractResult(result);
-                // If the above doesn't work, do client-side extraction
-                if (result.files.length === 0 && text.trim()) {
-                    // Basic client-side parse: extract code blocks
-                    const clientFiles = clientSideExtract(text);
-                    if (clientFiles.length > 0) {
-                        extractedFiles = clientFiles;
-                        renderTable();
-                        document.getElementById('main-content').style.display = 'flex';
-                        showStatus(`${t('files_found')}: ${clientFiles.length}`, 'success');
-                    }
+                // Actually re-extract with the dropped file content by calling
+                // the Rust backend with the text directly
+                // For now, use client-side fallback extraction
+                const clientFiles = clientSideExtract(text);
+                if (clientFiles.length > 0) {
+                    extractedFiles = clientFiles;
+                    renderTable();
+                    document.getElementById('main-content').style.display = 'flex';
+                    showStatus(`${t('files_found')}: ${clientFiles.length}`, 'success');
+                } else {
+                    showStatus(t('error_no_files'), 'warning');
                 }
             } catch (err) {
-                showStatus('Error: ' + err.toString(), 'error');
+                // Client-side fallback
+                const clientFiles = clientSideExtract(text);
+                if (clientFiles.length > 0) {
+                    extractedFiles = clientFiles;
+                    renderTable();
+                    document.getElementById('main-content').style.display = 'flex';
+                    showStatus(`${t('files_found')}: ${clientFiles.length}`, 'success');
+                } else {
+                    showStatus('Error: ' + err.toString(), 'error');
+                }
             }
         };
         reader.readAsText(file);
@@ -585,11 +592,10 @@ function clientSideExtract(text) {
     const files = [];
     const seen = new Set();
 
-    // Match ``` blocks
     const codeBlockRegex = /```(\w+)?(?::(.+?))?\s*\n([\s\S]*?)```/g;
     let match;
-
     let counter = 1;
+
     while ((match = codeBlockRegex.exec(text)) !== null) {
         let lang = (match[1] || 'text').toLowerCase();
         let path = match[2] || '';
@@ -645,6 +651,7 @@ function escapeHtml(str) {
 
 function showStatus(text, type) {
     const statusEl = document.getElementById('status-text');
+    if (!statusEl) return;
     statusEl.textContent = text;
     statusEl.className = 'status-badge';
 
@@ -664,22 +671,28 @@ function updateStatusBar() {
     const totalSize = extractedFiles.reduce((sum, f) => sum + f.size, 0);
     const selectedCount = extractedFiles.filter(f => f.selected).length;
 
-    document.getElementById('file-count').textContent =
-        `${t('files_found')}: ${count}${selectedCount !== count ? ` (${currentLang === 'ru' ? 'выбрано' : 'selected'}: ${selectedCount})` : ''}`;
-    document.getElementById('total-size').textContent =
-        `${t('total_size')}: ${formatSize(totalSize)}`;
+    const fileCountEl = document.getElementById('file-count');
+    const totalSizeEl = document.getElementById('total-size');
+    if (fileCountEl) {
+        fileCountEl.textContent = `${t('files_found')}: ${count}${selectedCount !== count ? ` (${t('selected')}: ${selectedCount})` : ''}`;
+    }
+    if (totalSizeEl) {
+        totalSizeEl.textContent = `${t('total_size')}: ${formatSize(totalSize)}`;
+    }
 }
 
 // ========== INIT ==========
 document.addEventListener('DOMContentLoaded', async () => {
-    await loadI18n();
     updateAllTexts();
 
-    // Set version
-    try {
-        const version = await invoke('get_version');
-        document.querySelector('.footer').textContent = `${t('version')}`;
-    } catch (e) {
-        document.querySelector('.footer').textContent = `v1.0.0`;
+    // Set version from package
+    const footer = document.querySelector('.footer');
+    if (footer) {
+        try {
+            const version = await invoke('get_version');
+            footer.textContent = `${t('version')}`;
+        } catch (e) {
+            footer.textContent = `v1.0.0`;
+        }
     }
 });

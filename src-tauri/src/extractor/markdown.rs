@@ -98,7 +98,7 @@ fn resolve_file_info(
         let ext = language_to_extension(&lang);
         let name = format!("main.{}", ext);
         let path = name.clone();
-        return (path, name, lang);
+        return (path, name, lang.clone());
     }
 
     // Priority 3: Try to detect from content

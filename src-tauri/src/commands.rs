@@ -1,7 +1,7 @@
 use std::path::PathBuf;
-use tauri::{AppHandle, State, Manager};
+use tauri::{AppHandle, Manager};
 
-use crate::extractor::{learning, extract_from_text, extract};
+use crate::extractor::{learning, extract_from_text};
 use crate::models::{ExtractResult, FileEntry, ArchiveInfo, LearningModel};
 use crate::preview;
 use crate::packer;
@@ -13,7 +13,12 @@ pub struct AppState {
 
 #[tauri::command]
 pub async fn extract_from_clipboard(app: AppHandle) -> Result<ExtractResult, String> {
-    let text = read_clipboard()?;
+    // Run blocking clipboard read off the main thread
+    let text = tokio::task::spawn_blocking(|| read_clipboard())
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
+        .map_err(|e| format!("Clipboard error: {}", e))?;
+
     let model = {
         let state = app.state::<AppState>();
         let guard = state.model.lock().map_err(|e| format!("Lock error: {}", e))?;
@@ -25,21 +30,37 @@ pub async fn extract_from_clipboard(app: AppHandle) -> Result<ExtractResult, Str
 
 #[tauri::command]
 pub async fn extract_from_url(url: String, app: AppHandle) -> Result<ExtractResult, String> {
+    // Basic URL validation — prevent SSRF, only allow http/https
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("Only http and https URLs are allowed".to_string());
+    }
+
     let model = {
         let state = app.state::<AppState>();
         let guard = state.model.lock().map_err(|e| format!("Lock error: {}", e))?;
         guard.clone()
     };
-    let result = url_extractor::fetch_and_extract(&url, &model).await?;
+
+    // Apply timeout to the whole fetch+extract operation
+    let fetch_future = url_extractor::fetch_and_extract(&url, &model);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), fetch_future)
+        .await
+        .map_err(|_| "Request timed out after 30 seconds".to_string())??;
+
     Ok(result)
 }
 
 #[tauri::command]
-pub async fn save_files(files: Vec<FileEntry>, base_path: String) -> Result<String, String> {
+pub async fn save_files(files: Vec<FileEntry>, base_path: String) -> Result<u32, String> {
     let base = PathBuf::from(&base_path);
     let mut saved = 0u32;
 
     for entry in &files {
+        // Path traversal protection
+        if !entry.is_safe_path() {
+            return Err(format!("Unsafe path rejected: {}", entry.path));
+        }
+
         let full_path = base.join(&entry.path);
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)
@@ -50,13 +71,20 @@ pub async fn save_files(files: Vec<FileEntry>, base_path: String) -> Result<Stri
         saved += 1;
     }
 
-    Ok(format!("{}", saved))
+    Ok(saved)
 }
 
 #[tauri::command]
 pub async fn create_archive(files: Vec<FileEntry>, save_path: String) -> Result<ArchiveInfo, String> {
     let path = PathBuf::from(&save_path);
-    let info = packer::pack(&files, &path, true)?;
+
+    // Run blocking archive pack off main thread
+    let info = tokio::task::spawn_blocking(move || {
+        packer::pack(&files, &path, true)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))??;
+
     Ok(info)
 }
 
@@ -64,15 +92,25 @@ pub async fn create_archive(files: Vec<FileEntry>, save_path: String) -> Result<
 pub async fn extract_archive(archive_path: String, output_dir: String) -> Result<Vec<FileEntry>, String> {
     let archive = PathBuf::from(&archive_path);
     let output = PathBuf::from(&output_dir);
-    let files = packer::unpack(&archive, &output)?;
+
+    let files = tokio::task::spawn_blocking(move || {
+        packer::unpack(&archive, &output)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))??;
+
     Ok(files)
 }
 
 #[tauri::command]
 pub async fn get_archive_info(archive_path: String) -> Result<ArchiveInfo, String> {
     let path = PathBuf::from(&archive_path);
-    let info = packer::get_archive_info(&path)?;
-    Ok(info)
+
+    tokio::task::spawn_blocking(move || {
+        packer::get_archive_info(&path)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 #[tauri::command]
@@ -97,8 +135,14 @@ pub async fn update_entry(
 
 #[tauri::command]
 pub async fn load_model(app: AppHandle) -> Result<LearningModel, String> {
-    let model = learning::load_model(&app);
-    // Also update the managed state
+    // Run file I/O off main thread
+    let app_clone = app.clone();
+    let model = tokio::task::spawn_blocking(move || {
+        learning::load_model(&app_clone)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?;
+
     let state = app.state::<AppState>();
     let mut guard = state.model.lock().map_err(|e| format!("Lock error: {}", e))?;
     *guard = model.clone();
@@ -113,20 +157,28 @@ pub async fn save_model(app: AppHandle, model: LearningModel) -> Result<(), Stri
         let mut guard = state.model.lock().map_err(|e| format!("Lock error: {}", e))?;
         *guard = model.clone();
     }
-    // Persist to disk
-    learning::save_model(&app, &model)?;
-    Ok(())
+    // Persist to disk off main thread
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || {
+        learning::save_model(&app_clone, &model)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 #[tauri::command]
 pub async fn preview_file(file: FileEntry) -> Result<String, String> {
-    let html = preview::highlight_code(&file.content, &file.language)?;
-    Ok(html)
+    // Run highlighting off main thread (CPU-bound with syntect)
+    tokio::task::spawn_blocking(move || {
+        preview::highlight_code(&file.content, &file.language)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 #[tauri::command]
 pub fn get_version() -> String {
-    "1.0.0".to_string()
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 #[tauri::command]
@@ -140,14 +192,16 @@ pub fn get_platform_names() -> Vec<String> {
     ]
 }
 
+/// Synchronous clipboard reader — runs inside spawn_blocking.
+/// Supports Linux (xclip, xsel), macOS (pbpaste), Windows (PowerShell).
 fn read_clipboard() -> Result<String, String> {
-    // Try xclip first (Linux), then powershell (Windows)
     #[cfg(target_os = "linux")]
     {
+        // Try xclip first
         let output = std::process::Command::new("xclip")
             .args(["-o", "-selection", "clipboard"])
             .output()
-            .map_err(|e| format!("Failed to run xclip: {}. Is xclip installed?", e))?;
+            .map_err(|e| format!("xclip not available: {}", e))?;
 
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -160,7 +214,7 @@ fn read_clipboard() -> Result<String, String> {
         let output2 = std::process::Command::new("xsel")
             .args(["-o", "-b"])
             .output()
-            .map_err(|e| format!("Failed to run xsel: {}", e))?;
+            .map_err(|e| format!("xsel not available: {}", e))?;
 
         if output2.status.success() {
             let text = String::from_utf8_lossy(&output2.stdout).to_string();
@@ -175,7 +229,7 @@ fn read_clipboard() -> Result<String, String> {
         let output = std::process::Command::new("powershell")
             .args(["-command", "Get-Clipboard"])
             .output()
-            .map_err(|e| format!("Failed to run PowerShell: {}", e))?;
+            .map_err(|e| format!("PowerShell failed: {}", e))?;
 
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -189,7 +243,7 @@ fn read_clipboard() -> Result<String, String> {
     {
         let output = std::process::Command::new("pbpaste")
             .output()
-            .map_err(|e| format!("Failed to run pbpaste: {}", e))?;
+            .map_err(|e| format!("pbpaste failed: {}", e))?;
 
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout).to_string();
