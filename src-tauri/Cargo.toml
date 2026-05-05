@@ -1,0 +1,29 @@
+[package]
+name = "deepseek-extractor"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+name = "deepseek_extractor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "parsing"] }
+zstd = { version = "0.13", default-features = false }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+scraper = "0.21"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+once_cell = "1"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

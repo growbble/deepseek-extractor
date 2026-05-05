@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="app_name">DeepSeek Extractor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- HEADER -->
+        <div class="header">
+            <div class="header-title" data-i18n="app_name">DeepSeek Extractor</div>
+            <div class="header-controls">
+                <button class="lang-btn active" data-lang="ru" onclick="setLang('ru')" data-i18n="lang_ru">RU</button>
+                <button class="lang-btn" data-lang="en" onclick="setLang('en')" data-i18n="lang_en">EN</button>
+            </div>
+        </div>
+
+        <!-- INPUT PANEL -->
+        <div class="input-panel">
+            <button class="btn btn-primary" id="paste-btn" onclick="pasteFromClipboard()" data-i18n="paste_from_clipboard">📋 Вставить из буфера</button>
+            <input type="text" class="url-input" id="url-input" placeholder="Вставьте URL с диалогом ИИ..." data-i18n-placeholder="url_placeholder">
+            <button class="btn btn-primary" id="fetch-btn" onclick="fetchFromUrl()" data-i18n="extract_from_url">🔍 Извлечь</button>
+        </div>
+
+        <!-- DROP ZONE -->
+        <div class="drop-zone" id="drop-zone" data-i18n="drag_drop_hint">Перетащите текстовый файл сюда</div>
+
+        <!-- MAIN CONTENT -->
+        <div class="main-content" id="main-content" style="display: none;">
+            <!-- FILES PANEL -->
+            <div class="files-panel">
+                <div class="table-container">
+                    <table class="file-table" id="file-table">
+                        <thead>
+                            <tr>
+                                <th class="col-checkbox">
+                                    <input type="checkbox" id="select-all" onchange="toggleSelectAll()">
+                                </th>
+                                <th class="col-name" data-i18n="file_name">Имя файла</th>
+                                <th class="col-path" data-i18n="path">Путь</th>
+                                <th class="col-lang" data-i18n="language">Язык</th>
+                                <th class="col-size" data-i18n="size">Размер</th>
+                                <th class="col-actions" data-i18n="actions">Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody id="file-table-body"></tbody>
+                    </table>
+                </div>
+
+                <!-- BOTTOM BAR -->
+                <div class="bottom-bar">
+                    <button class="btn btn-success" id="save-folder-btn" onclick="saveToFolder()" data-i18n="save_to_folder">💾 Сохранить в папку</button>
+                    <button class="btn btn-warning" id="create-archive-btn" onclick="createArchive()" data-i18n="create_archive">📦 Создать архив</button>
+                    <button class="btn btn-secondary" id="extract-archive-btn" onclick="extractArchive()" data-i18n="extract_archive">📂 Извлечь архив</button>
+                    <input type="text" class="archive-input" id="archive-path" placeholder="path/to/archive.cpk" data-i18n-placeholder="archive_path">
+                    <button class="btn btn-danger" id="reset-learning-btn" onclick="resetLearning()" data-i18n="reset_learning">🔄 Сбросить обучение</button>
+                </div>
+            </div>
+
+            <!-- PREVIEW PANEL -->
+            <div class="preview-panel" id="preview-panel">
+                <div class="preview-header" data-i18n="preview">Предпросмотр</div>
+                <div class="preview-content" id="preview-content">
+                    <div style="padding: 20px; color: var(--text-muted); text-align: center; font-size: 13px;" data-i18n="status_ready">Готов к работе</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- STATUS BAR -->
+        <div class="status-bar">
+            <div class="status-info">
+                <span id="file-count" data-i18n="files_found" data-count="0">Найдено файлов: 0</span>
+                <span id="total-size" data-i18n="total_size" data-size="0 B">Общий размер: 0 B</span>
+            </div>
+            <span id="status-text" class="status-badge" data-i18n="status_ready">Готов к работе</span>
+        </div>
+
+        <!-- FOOTER -->
+        <div class="footer" data-i18n="version">Версия 1.0.0</div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
