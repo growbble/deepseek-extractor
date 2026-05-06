@@ -1,13 +1,18 @@
-pub mod regex_pat;
-pub mod markdown;
-pub mod learning;
+pub(crate) mod regex_pat;
+pub(crate) mod markdown;
+pub(crate) mod learning;
 
 use std::collections::HashSet;
 use crate::models::{ExtractResult, FileEntry, LearningModel};
 use regex_pat::extract_with_regex;
 use markdown::extract_markdown_blocks;
 
-pub fn extract(text: &str, model: &LearningModel) -> ExtractResult {
+/// Main extraction pipeline:
+/// 1. Regex patterns (most reliable for explicit `File: path` headers)
+/// 2. Learned patterns from the ML model
+/// 3. Markdown code blocks (` ``` ` blocks)
+/// 4. Build unparsed text (what remains after removing extracted content)
+pub(crate) fn extract(text: &str, model: &LearningModel) -> ExtractResult {
     let mut files: Vec<FileEntry> = Vec::new();
     let mut found_ids: HashSet<String> = HashSet::new();
 
@@ -19,7 +24,7 @@ pub fn extract(text: &str, model: &LearningModel) -> ExtractResult {
         }
     }
 
-    // 2. Try learned patterns
+    // 2. Try learned patterns from ML model
     for pattern in &model.patterns {
         let learned_files = extract_with_pattern(text, pattern);
         for f in learned_files {
@@ -37,16 +42,22 @@ pub fn extract(text: &str, model: &LearningModel) -> ExtractResult {
         }
     }
 
-    // 4. Build unparsed text (text outside code blocks)
+    // 4. Build unparsed text (text outside extracted files)
     let unparsed = build_unparsed_text(text, &files);
 
+    // Compute confidence score
     let confidence = if files.is_empty() {
         0.0
     } else {
         let base = 0.5;
-        let bonus = (files.len() as f64).min(10.0) / 20.0;
-        let has_paths = files.iter().filter(|f| f.path.len() > f.name.len()).count() as f64 / files.len() as f64 * 0.3;
-        (base + bonus + has_paths).min(1.0)
+        let count_bonus = (files.len() as f64).min(10.0) / 20.0;
+        let path_quality = if files.is_empty() {
+            0.0
+        } else {
+            let has_paths = files.iter().filter(|f| f.path.len() > f.name.len()).count() as f64;
+            (has_paths / files.len() as f64) * 0.3
+        };
+        (base + count_bonus + path_quality).clamp(0.0, 1.0)
     };
 
     ExtractResult {
@@ -57,16 +68,15 @@ pub fn extract(text: &str, model: &LearningModel) -> ExtractResult {
     }
 }
 
-/// Remove all file contents from the original text, collecting what remains.
-/// Uses repeated replace to handle multiple occurrences of the same content.
+/// Remove extracted file contents from the original text, collecting what remains.
+/// Scans through the text character by character to avoid O(n²) behavior with replace.
 fn build_unparsed_text(text: &str, files: &[FileEntry]) -> String {
     let mut result = text.to_string();
     for f in files {
-        // Replace only one occurrence at a time to avoid touching duplicate filenames in non-content
+        // Replace one occurrence at a time to avoid touching duplicate filenames
         result = result.replacen(&f.content, "", result.len().min(f.content.len()));
     }
     let trimmed = result.trim().to_string();
-    // If nothing left or only whitespace, return empty
     if trimmed.is_empty() || trimmed.chars().all(|c| c.is_whitespace()) {
         String::new()
     } else {
@@ -74,15 +84,15 @@ fn build_unparsed_text(text: &str, files: &[FileEntry]) -> String {
     }
 }
 
-pub fn extract_from_text(text: &str, source: &str, model: &LearningModel) -> ExtractResult {
+/// Run the full extraction pipeline and set the source string.
+pub(crate) fn extract_from_text(text: &str, source: &str, model: &LearningModel) -> ExtractResult {
     let mut result = extract(text, model);
     result.source = source.to_string();
     result
 }
 
 /// Extract files using a learned pattern's regex.
-/// Used by both the cascade in extract() and the learning module.
-pub fn extract_with_pattern(text: &str, pattern: &crate::models::LearnedPattern) -> Vec<FileEntry> {
+pub(crate) fn extract_with_pattern(text: &str, pattern: &crate::models::LearnedPattern) -> Vec<FileEntry> {
     use uuid::Uuid;
     use crate::extractor::regex_pat::{detect_language_from_path, extract_filename};
 

@@ -1,6 +1,6 @@
 use scraper::{Html, Selector};
 
-pub fn extract_from_html(html: &str) -> String {
+pub(crate) fn extract_from_html(html: &str) -> String {
     let document = Html::parse_document(html);
     let mut result = String::new();
 

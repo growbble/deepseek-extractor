@@ -12,7 +12,7 @@ static RE_TILDE_BLOCK: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?ms)^~~~(\w+)?(?::(.+?))?\s*\n(.*?)~~~").unwrap()
 });
 
-pub fn extract_markdown_blocks(text: &str) -> Vec<FileEntry> {
+pub(crate) fn extract_markdown_blocks(text: &str) -> Vec<FileEntry> {
     let mut files: Vec<FileEntry> = Vec::new();
     let mut seen_content: std::collections::HashSet<String> = std::collections::HashSet::new();
 

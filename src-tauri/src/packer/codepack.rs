@@ -1,5 +1,5 @@
 use std::io::{Read, Write, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, Component};
 use sha2::{Sha256, Digest};
 
 use crate::models::{ArchiveEntry, ArchiveInfo, FileEntry};
@@ -11,23 +11,47 @@ const VERSION: u16 = 1;
 /// [HEADER]    4B magic CPK\0 | 2B version | 1B flags | 4B entry_count
 /// [TOC]       entry_count × (2B name_len | name_bytes | 4B reserved | 8B orig_size | 8B comp_size | 8B data_offset)
 /// [DATA]      entry_count × comp_data (variable)
-/// [FOOTER]    32B SHA-256 of TOC (if bit 1 of flags set)
+/// [FOOTER]    32B SHA-256 of TOC
 
 const HEADER_SIZE: u64 = 4 + 2 + 1 + 4; // 11
-const TOC_ENTRY_SIZE: u64 = 2 + 4 + 8 + 8 + 8; // 30 (name_len + reserved + orig_size + comp_size + data_offset)
+const TOC_ENTRY_SIZE: u64 = 2 + 4 + 8 + 8 + 8; // 30
 
-/// Maximum number of entries to prevent memory DoS
 const MAX_ENTRIES: usize = 10_000;
-/// Maximum single entry name length
 const MAX_NAME_LEN: usize = 4_096;
-/// Maximum single entry decompressed size (256 MB)
-const MAX_ENTRY_SIZE: u64 = 256 * 1024 * 1024;
-/// Minimum header size (magic + version + flags + count)
-const MIN_FILE_SIZE: u64 = HEADER_SIZE + 32; // header + at least minimal hash footer
+const MAX_ENTRY_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
+const MIN_FILE_SIZE: u64 = HEADER_SIZE + 32; // header + minimal hash
 
-pub fn pack(entries: &[FileEntry], save_path: &Path, compress: bool) -> Result<ArchiveInfo, String> {
+/// Normalize a path to prevent archive slip — resolves `.` and `..` components.
+/// Returns None if the path would escape its root via `..`.
+fn normalize_path(path: &str) -> Option<String> {
+    let mut result = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::ParentDir => {
+                if result.pop().is_none() {
+                    // Attempted to escape above root
+                    return None;
+                }
+            }
+            Component::Normal(part) => {
+                let s = part.to_str()?;
+                if !s.is_empty() {
+                    result.push(s.to_string());
+                }
+            }
+            Component::CurDir => { /* skip `.` */ }
+            Component::RootDir | Component::Prefix(_) => {
+                // Absolute components not allowed
+                return None;
+            }
+        }
+    }
+    Some(result.join("/"))
+}
+
+pub(crate) fn pack(entries: &[FileEntry], save_path: &Path, compress: bool) -> Result<ArchiveInfo, String> {
     if entries.is_empty() {
-        return Err("No files to archive".to_string());
+        return Err("No files to archive".into());
     }
     if entries.len() > MAX_ENTRIES {
         return Err(format!("Too many entries (max {})", MAX_ENTRIES));
@@ -37,8 +61,9 @@ pub fn pack(entries: &[FileEntry], save_path: &Path, compress: bool) -> Result<A
         .map_err(|e| format!("Cannot create archive: {}", e))?;
     let mut writer = std::io::BufWriter::new(file);
 
-    let count = entries.len() as u32;
-    let flags: u8 = if compress { 1 } else { 0 } | 2; // bit 0: compressed, bit 1: has_hash
+    let count: u32 = entries.len().try_into()
+        .map_err(|_| "Too many entries".to_string())?;
+    let flags: u8 = if compress { 1 } else { 0 } | 2; // compressed + has_hash
 
     writer.write_all(MAGIC).map_err(|e| format!("Write error: {}", e))?;
     writer.write_all(&VERSION.to_le_bytes()).map_err(|e| format!("Write error: {}", e))?;
@@ -53,16 +78,23 @@ pub fn pack(entries: &[FileEntry], save_path: &Path, compress: bool) -> Result<A
     }
 
     let mut toc_entries: Vec<TocEntry> = Vec::with_capacity(entries.len());
+    let mut seen_names = std::collections::HashSet::new();
 
     for entry in entries {
+        // Deduplicate entry names
+        if !seen_names.insert(entry.path.clone()) {
+            return Err(format!("Duplicate entry name: {}", entry.path));
+        }
+
         let data = entry.content.as_bytes();
-        let orig_size = data.len() as u64;
+        let orig_size: u64 = data.len().try_into()
+            .map_err(|_| "Entry content too large".to_string())?;
 
         if orig_size > MAX_ENTRY_SIZE {
             return Err(format!("Entry '{}' too large ({} > {} max)", entry.path, orig_size, MAX_ENTRY_SIZE));
         }
 
-        let compressed = if compress {
+        let compressed = if compress && orig_size > 0 {
             let bound = zstd::zstd_safe::compress_bound(orig_size as usize);
             let mut cbuf = vec![0u8; bound];
             let written = zstd::zstd_safe::compress(&mut cbuf, data, 1)
@@ -76,21 +108,25 @@ pub fn pack(entries: &[FileEntry], save_path: &Path, compress: bool) -> Result<A
             data.to_vec()
         };
 
+        let comp_size: u64 = compressed.len().try_into()
+            .map_err(|_| "Compressed size overflow".to_string())?;
+
         toc_entries.push(TocEntry {
             name: entry.path.clone(),
             orig_size,
-            comp_size: compressed.len() as u64,
+            comp_size,
             data: compressed,
         });
     }
 
-    let mut data_offset = HEADER_SIZE + (count as u64) * TOC_ENTRY_SIZE;
+    let mut data_offset = HEADER_SIZE.saturating_add((count as u64).saturating_mul(TOC_ENTRY_SIZE));
     let mut toc_hasher = Sha256::new();
 
-    // Write TOC entries
+    // Write TOC
     for te in &toc_entries {
         let name_bytes = te.name.as_bytes();
-        let name_len = name_bytes.len() as u16;
+        let name_len: u16 = name_bytes.len().try_into()
+            .map_err(|_| "Entry name too long".to_string())?;
 
         toc_hasher.update(&name_len.to_le_bytes());
         toc_hasher.update(name_bytes);
@@ -120,8 +156,8 @@ pub fn pack(entries: &[FileEntry], save_path: &Path, compress: bool) -> Result<A
     writer.flush().map_err(|e| format!("Flush error: {}", e))?;
     drop(writer);
 
-    let total_original: u64 = toc_entries.iter().map(|e| e.orig_size).sum();
-    let total_compressed: u64 = toc_entries.iter().map(|e| e.comp_size).sum();
+    let total_original: u64 = toc_entries.iter().fold(0u64, |a, e| a.saturating_add(e.orig_size));
+    let total_compressed: u64 = toc_entries.iter().fold(0u64, |a, e| a.saturating_add(e.comp_size));
 
     let arch_entries: Vec<ArchiveEntry> = toc_entries.iter().map(|te| ArchiveEntry {
         name: te.name.clone(),
@@ -137,22 +173,22 @@ pub fn pack(entries: &[FileEntry], save_path: &Path, compress: bool) -> Result<A
     })
 }
 
-pub fn unpack(archive_path: &Path, output_dir: &Path) -> Result<Vec<FileEntry>, String> {
+pub(crate) fn unpack(archive_path: &Path, output_dir: &Path) -> Result<Vec<FileEntry>, String> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| format!("Cannot open archive: {}", e))?;
-    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let file_len: u64 = file.metadata().map(|m| m.len()).unwrap_or(0);
 
     if file_len < MIN_FILE_SIZE {
-        return Err("File too small to be a valid archive".to_string());
+        return Err("File too small to be a valid archive".into());
     }
 
     let mut reader = std::io::BufReader::new(file);
 
-    // Read and verify magic
+    // Read magic
     let mut magic = [0u8; 4];
     reader.read_exact(&mut magic).map_err(|e| format!("Read error: {}", e))?;
     if &magic != MAGIC {
-        return Err("Invalid archive format: bad magic".to_string());
+        return Err("Invalid archive format: bad magic".into());
     }
 
     let mut version_buf = [0u8; 2];
@@ -168,23 +204,19 @@ pub fn unpack(archive_path: &Path, output_dir: &Path) -> Result<Vec<FileEntry>, 
     reader.read_exact(&mut count_buf).map_err(|e| format!("Read error: {}", e))?;
     let count = u32::from_le_bytes(count_buf) as usize;
 
-    if count == 0 {
-        return Err("Archive has no entries".to_string());
-    }
-    if count > MAX_ENTRIES {
-        return Err(format!("Archive has too many entries ({} > {} max)", count, MAX_ENTRIES));
+    if count == 0 || count > MAX_ENTRIES {
+        return Err(format!("Invalid entry count: {}", count));
     }
 
-    // Validate minimum file size based on claimed entries
-    let expected_toc_size = count as u64 * TOC_ENTRY_SIZE;
-    let expected_min = HEADER_SIZE + expected_toc_size + if has_hash { 32u64 } else { 0 };
+    let expected_toc_size: u64 = (count as u64).saturating_mul(TOC_ENTRY_SIZE);
+    let expected_min = HEADER_SIZE.saturating_add(expected_toc_size).saturating_add(if has_hash { 32 } else { 0 });
     if file_len < expected_min {
-        return Err("Archive appears truncated: file smaller than header+TOC claims".to_string());
+        return Err("Archive too small for claimed entries".into());
     }
 
     let mut toc_hasher = Sha256::new();
 
-    // Read TOC entries
+    // Read TOC
     let mut toc_entries: Vec<(String, u64, u64, u64)> = Vec::with_capacity(count);
     for _ in 0..count {
         let mut name_len_buf = [0u8; 2];
@@ -197,10 +229,9 @@ pub fn unpack(archive_path: &Path, output_dir: &Path) -> Result<Vec<FileEntry>, 
 
         let mut name_bytes = vec![0u8; name_len];
         reader.read_exact(&mut name_bytes).map_err(|e| format!("Read error: {}", e))?;
-        let name = String::from_utf8(name_bytes)
-            .map_err(|_| "Invalid UTF-8 in archive entry name".to_string())?;
+        let name = String::from_utf8(name_bytes.clone())
+            .map_err(|_| "Invalid UTF-8 in entry name".to_string())?;
 
-        // Skip 4 bytes reserved/padding
         let mut _reserved = [0u8; 4];
         reader.read_exact(&mut _reserved).map_err(|e| format!("Read error: {}", e))?;
 
@@ -225,70 +256,64 @@ pub fn unpack(archive_path: &Path, output_dir: &Path) -> Result<Vec<FileEntry>, 
         toc_entries.push((name, orig_size, comp_size, data_offset));
     }
 
-    // Verify TOC hash if present
+    // Verify TOC hash
     if has_hash {
         let computed_hash = toc_hasher.finalize();
         let mut stored_hash = [0u8; 32];
-        // Seek to footer: file_len - 32
         reader.seek(SeekFrom::End(-32)).map_err(|e| format!("Seek error: {}", e))?;
         reader.read_exact(&mut stored_hash).map_err(|e| format!("Read hash error: {}", e))?;
 
         if computed_hash[..] != stored_hash[..] {
-            return Err("Archive hash mismatch: TOC integrity check failed".to_string());
+            return Err("Archive hash mismatch: TOC integrity check failed".into());
         }
 
-        // Seek back to after TOC for data reading
-        let data_start = HEADER_SIZE + (count as u64) * TOC_ENTRY_SIZE;
+        let data_start = HEADER_SIZE.saturating_add((count as u64).saturating_mul(TOC_ENTRY_SIZE));
         reader.seek(SeekFrom::Start(data_start)).map_err(|e| format!("Seek error: {}", e))?;
     }
 
-    // Read and decompress data for each TOC entry
+    // Read and decompress data
     let mut files = Vec::with_capacity(toc_entries.len());
 
     for (name, orig_size, comp_size, data_offset) in &toc_entries {
         let offset = *data_offset;
-        let csize = *comp_size as usize;
-        let osize = *orig_size as usize;
+        let csize: u64 = *comp_size;
+        let osize: u64 = *orig_size;
 
-        if osize > MAX_ENTRY_SIZE as usize {
-            return Err(format!("Entry '{}' original size {} exceeds maximum", name, osize));
+        if osize > MAX_ENTRY_SIZE {
+            return Err(format!("Entry '{}' original size {} exceeds maximum {}", name, osize, MAX_ENTRY_SIZE));
         }
 
-        // Validate offset and size against file bounds
-        let data_end = offset.saturating_add(*comp_size);
+        let data_end = offset.saturating_add(csize);
         if data_end > file_len {
-            return Err(format!(
-                "Corrupt archive: entry '{}' at offset {} with size {} exceeds file length {}",
-                name, offset, comp_size, file_len
-            ));
+            return Err(format!("Corrupt archive: entry '{}' exceeds file length", name));
         }
 
-        // Validate that data_offset is after TOC
-        let toc_end = HEADER_SIZE + (count as u64) * TOC_ENTRY_SIZE;
+        let toc_end = HEADER_SIZE.saturating_add((count as u64).saturating_mul(TOC_ENTRY_SIZE));
         if offset < toc_end {
-            return Err(format!(
-                "Corrupt archive: entry '{}' data offset {} overlaps TOC (ends at {})",
-                name, offset, toc_end
-            ));
+            return Err(format!("Corrupt archive: entry '{}' overlaps TOC", name));
         }
 
         reader.seek(SeekFrom::Start(offset))
-            .map_err(|e| format!("Seek error at entry '{}': {}", name, e))?;
+            .map_err(|e| format!("Seek error at '{}': {}", name, e))?;
 
-        let mut compressed_data = vec![0u8; csize];
+        let csize_usize: usize = (csize).try_into()
+            .map_err(|_| format!("Compressed size overflow in '{}'", name))?;
+        let mut compressed_data = vec![0u8; csize_usize];
         reader.read_exact(&mut compressed_data)
-            .map_err(|e| format!("Read error at entry '{}': {}", name, e))?;
+            .map_err(|e| format!("Read error at '{}': {}", name, e))?;
 
         let is_compressed = csize < osize;
         let content: String = if is_compressed {
-            let mut decompressed = vec![0u8; osize];
+            let osize_usize: usize = osize.try_into()
+                .map_err(|_| format!("Original size overflow in '{}'", name))?;
+            let mut decompressed = vec![0u8; osize_usize];
             zstd::zstd_safe::decompress(&mut decompressed, &compressed_data)
                 .map_err(|e| format!("Decompression error in '{}': {}", name, e))?;
             String::from_utf8(decompressed)
-                .map_err(|_| format!("Invalid UTF-8 content in '{}'", name))?
+                .map_err(|_| format!("Invalid UTF-8 in '{}'", name))?
         } else {
             String::from_utf8(compressed_data)
-                .map_err(|_| format!("Invalid UTF-8 content in '{}'", name))?
+                .map_err(|_| format!("Invalid UTF-8 in '{}'", name))?
         };
 
         let file_name = extract_name(name);
@@ -305,35 +330,56 @@ pub fn unpack(archive_path: &Path, output_dir: &Path) -> Result<Vec<FileEntry>, 
         });
     }
 
-    // Create output directory and write files
+    // Create output dir
     std::fs::create_dir_all(output_dir)
-        .map_err(|e| format!("Cannot create output directory: {}", e))?;
+        .map_err(|e| format!("Cannot create output dir: {}", e))?;
+
+    // Canonicalize output dir for archive slip protection
+    let output_canonical = std::fs::canonicalize(output_dir)
+        .map_err(|e| format!("Cannot resolve output dir: {}", e))?;
 
     for entry in &files {
-        // Path traversal protection
-        if entry.path.contains("..") || entry.path.starts_with('/') || entry.path.starts_with('\\') {
-            return Err(format!("Unsafe path in archive: {}", entry.path));
+        // First: normalize path (resolve .. and . components)
+        let normalized = normalize_path(&entry.path)
+            .ok_or_else(|| format!("Unsafe path in archive: {}", entry.path))?;
+        let normalized_path = Path::new(&normalized);
+
+        // Check is_safe_path for secondary validation
+        if !entry.is_safe_path() {
+            return Err(format!("Unsafe entry rejected: {}", entry.path));
         }
 
-        let full_path = output_dir.join(&entry.path);
+        let full_path = output_canonical.join(normalized_path);
+
+        // **Archive slip protection**: verify the resolved path is still within output_dir
+        let full_canonical = std::fs::canonicalize(full_path.parent().unwrap_or(&full_path))
+            .unwrap_or_else(|_| full_path.clone());
+
+        if !full_canonical.starts_with(&output_canonical) {
+            // If canonicalization failed or path escapes, use the safer check
+            if !full_path.starts_with(&output_canonical) {
+                return Err(format!("Archive slip detected: '{}' escapes output directory", entry.path));
+            }
+        }
+
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Cannot create directory {}: {}", parent.display(), e))?;
+                .map_err(|e| format!("Cannot create dir {}: {}", parent.display(), e))?;
         }
         std::fs::write(&full_path, &entry.content)
-            .map_err(|e| format!("Cannot write file {}: {}", full_path.display(), e))?;
+            .map_err(|e| format!("Cannot write {}: {}", full_path.display(), e))?;
     }
 
     Ok(files)
 }
 
-pub fn get_archive_info(archive_path: &Path) -> Result<ArchiveInfo, String> {
+pub(crate) fn get_archive_info(archive_path: &Path) -> Result<ArchiveInfo, String> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| format!("Cannot open archive: {}", e))?;
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
 
     if file_len < MIN_FILE_SIZE {
-        return Err("File too small to be a valid archive".to_string());
+        return Err("File too small to be a valid archive".into());
     }
 
     let mut reader = std::io::BufReader::new(file);
@@ -341,7 +387,7 @@ pub fn get_archive_info(archive_path: &Path) -> Result<ArchiveInfo, String> {
     let mut magic = [0u8; 4];
     reader.read_exact(&mut magic).map_err(|e| format!("Read error: {}", e))?;
     if &magic != MAGIC {
-        return Err("Invalid archive format".to_string());
+        return Err("Invalid archive format".into());
     }
 
     let mut _version_buf = [0u8; 2];
@@ -355,7 +401,7 @@ pub fn get_archive_info(archive_path: &Path) -> Result<ArchiveInfo, String> {
     let count = u32::from_le_bytes(count_buf);
 
     if count > MAX_ENTRIES as u32 {
-        return Err("Archive has too many entries".to_string());
+        return Err("Archive has too many entries".into());
     }
 
     let mut entries = Vec::with_capacity(count as usize);
